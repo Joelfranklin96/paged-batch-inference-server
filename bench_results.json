@@ -1,0 +1,280 @@
+{
+  "_legend": {
+    "_about": "JSON has no comment syntax, so this block documents every key below. Suffix _s means seconds, _ms means milliseconds. 'continuous' = the full server path (priority scheduler + paged KV cache + per-token streaming). 'static' = static_batch_generate, which prefills the whole batch and decodes in lockstep with one contiguous KV cache per sequence, returning nothing until every sequence finishes.",
+    "config": {
+      "_about": "The benchmark workload. Every number in this file was produced with exactly these settings.",
+      "d_model": "Hidden/embedding width of the single attention layer. Drives the cost of every matmul.",
+      "vocab_size": "Number of distinct tokens. Sets the size of the embedding table and the output projection, which is the most expensive matmul per token.",
+      "max_seq_len": "Maximum context a sequence may reach. A contiguous cache must reserve this much room per sequence up front; the paged cache does not, which is the whole point of the capacity comparison.",
+      "block_size": "KV cache tokens per fixed-size block. Also the upper bound on internal fragmentation: a sequence wastes at most block_size - 1 token slots in its last partly-filled block.",
+      "num_blocks": "Total blocks in the shared KV pool. num_blocks * block_size = total token slots available across all sequences.",
+      "num_requests": "Concurrent requests submitted per trial.",
+      "prompt_tokens": "Prompt length per request, in tokens (the tokenizer is character-level and prepends <bos>, so a 127-character string is 128 tokens).",
+      "max_new_tokens": "Tokens generated per request. End-of-sequence is disabled during the benchmark so every trial generates exactly num_requests * max_new_tokens tokens and runs stay comparable.",
+      "trials": "Measured repetitions. One extra warm-up run happens first and is discarded. Summary values are medians across these trials."
+    },
+    "env": {
+      "_about": "Machine and library versions, recorded so the numbers can be reproduced or discounted.",
+      "machine": "CPU architecture.",
+      "processor": "CPU identification string reported by the OS.",
+      "platform": "Operating system and build.",
+      "python": "Python interpreter version.",
+      "numpy": "NumPy version. All compute in this project is NumPy, so its BLAS backend dominates runtime.",
+      "blas_threads": "Thread cap applied to the BLAS backend before NumPy was imported. '1' means single-threaded, so results reflect one core and are not inflated by hidden parallelism."
+    },
+    "continuous": {
+      "_about": "One entry per trial for the continuous-batching server path. Timings come from an event log of submit/token/finish events.",
+      "total_time_s": "Wall-clock seconds from the first submit to the last token of the last request.",
+      "throughput": {
+        "tokens_per_second": "All tokens generated across all requests divided by total_time_s. This is aggregate system throughput, not per-stream speed.",
+        "requests_per_second": "Requests completed divided by total_time_s.",
+        "total_tokens": "Token events counted in the log. Should equal num_requests * max_new_tokens.",
+        "total_requests": "Requests that reached a finish event. Should equal num_requests."
+      },
+      "ttft_first_s": "Time to first token for the single fastest request: how long the earliest-served user waits before seeing any output.",
+      "ttft_percentiles_s": {
+        "_about": "Distribution of time-to-first-token across all requests, measured per request from its submit event to its first token event. Keys are percentiles.",
+        "50.0": "Median request's wait for its first token.",
+        "90.0": "The wait experienced by the 10% worst-served requests. The usual tail-latency SLO number.",
+        "99.0": "Worst-case wait. With only 8 requests this is effectively the maximum, not a meaningful p99."
+      },
+      "mean_itl_s": "Mean inter-token latency: for each request, the average gap between consecutive tokens, then averaged over requests. This is per-stream cadence, i.e. how fast text appears to one user. It is roughly num_requests times the single-sequence decode cost, because each step loops over every running sequence before any one of them advances again.",
+      "peak_blocks_used": "Highest number of KV blocks simultaneously allocated during the trial, out of config.num_blocks. Shows how much of the pool the workload actually needed.",
+      "max_waste_tokens_per_seq": "Peak internal fragmentation: allocated token slots minus tokens actually stored, averaged per live sequence, taken at its worst moment. Bounded by block_size - 1 by construction; a value of 15.0 with block_size 16 means fragmentation stayed under one block per sequence."
+    },
+    "static": {
+      "_about": "One entry per trial for the static-batching baseline, run on the same prompts and the same model weights.",
+      "total_time_s": "Wall-clock seconds for the whole batch. Because static batching returns only when every sequence is done, this is also the time until the user sees any output at all, which is why it is compared against continuous TTFT in the summary.",
+      "tokens_per_second": "Tokens generated divided by total_time_s.",
+      "total_tokens": "Tokens generated across the batch, matching the continuous run for a like-for-like comparison."
+    },
+    "single_sequence": {
+      "_about": "One entry per trial. Isolates the cost of one decode step for a single sequence with no batching, to price the paged cache against the contiguous one. 'mean' is sensitive to occasional slow steps; 'median' is the typical step and is what the summary uses.",
+      "contiguous_mean_ms": "Average milliseconds per decode step using the contiguous KV cache path.",
+      "contiguous_median_ms": "Typical milliseconds per decode step, contiguous path.",
+      "paged_mean_ms": "Average milliseconds per decode step using the block-paged KV cache, which must gather scattered blocks before attending.",
+      "paged_median_ms": "Typical milliseconds per decode step, paged path. The gap against contiguous_median_ms is the overhead paging costs."
+    },
+    "capacity": {
+      "_about": "Arithmetic and allocator-verified concurrency comparison at identical KV memory. No timing involved: sequences are pushed into the real allocator until it reports out-of-memory.",
+      "paged_concurrent_seqs": "Sequences that actually fit, because paging reserves only the blocks a sequence needs for its prompt plus its token budget.",
+      "contiguous_concurrent_seqs": "Sequences that fit when each must reserve max_seq_len slots up front, as a contiguous cache requires: total_kv_slots / max_seq_len.",
+      "ratio": "paged_concurrent_seqs / contiguous_concurrent_seqs. How many more users the same memory can serve. Depends on the gap between tokens_per_seq and config.max_seq_len.",
+      "tokens_per_seq": "Token slots one sequence truly needs: prompt_tokens + max_new_tokens.",
+      "total_kv_slots": "Shared pool size in token slots: config.num_blocks * config.block_size."
+    },
+    "summary": {
+      "_about": "Headline figures. Every '_median' value is the median across trials, which is the number to quote.",
+      "continuous_tokens_per_sec_median": "Aggregate throughput of the continuous-batching server.",
+      "continuous_tokens_per_sec_range": "[slowest trial, fastest trial] throughput, showing run-to-run spread.",
+      "static_tokens_per_sec_median": "Aggregate throughput of the static-batching baseline.",
+      "throughput_ratio_continuous_vs_static": "continuous / static throughput. Below 1.0 means paging costs a little raw throughput; the fraction below 1.0 is the overhead. With equal-length requests that all fit in memory, continuous batching has no throughput advantage to offer here, so its wins show up in latency and capacity instead.",
+      "ttft_first_ms_median": "Fastest request's time to first token.",
+      "ttft_p50_ms_median": "Median request's time to first token.",
+      "ttft_p90_ms_median": "Tail time to first token. Nearly identical to p50 here because all 8 prompts fit in the KV pool at once, so the scheduler admits and prefills them in a single step and no request ever queues.",
+      "mean_itl_ms_median": "Per-stream inter-token latency under full concurrency.",
+      "single_seq_paged_median_ms": "Per-token decode latency, one sequence, paged cache.",
+      "single_seq_contiguous_median_ms": "Per-token decode latency, one sequence, contiguous cache. Compare with the line above to price paging.",
+      "static_total_time_ms_median": "How long a static batch runs before producing any output.",
+      "first_output_ratio_static_vs_continuous_p90": "static_total_time_ms_median / ttft_p90_ms_median. How much sooner a user sees their first token with the streaming server than by waiting for a static batch to finish. This is the headline latency win.",
+      "peak_blocks_used": "Worst-case block occupancy observed across trials, out of config.num_blocks.",
+      "max_waste_tokens_per_seq": "Worst-case internal fragmentation observed across trials, in token slots per sequence."
+    }
+  },
+  "config": {
+    "d_model": 256,
+    "vocab_size": 4096,
+    "max_seq_len": 512,
+    "block_size": 16,
+    "num_blocks": 256,
+    "num_requests": 8,
+    "prompt_tokens": 128,
+    "max_new_tokens": 64,
+    "trials": 5
+  },
+  "env": {
+    "machine": "AMD64",
+    "processor": "Intel64 Family 6 Model 186 Stepping 2, GenuineIntel",
+    "platform": "Windows-10-10.0.26200-SP0",
+    "python": "3.11.3",
+    "numpy": "2.4.6",
+    "blas_threads": "1"
+  },
+  "continuous": [
+    {
+      "total_time_s": 0.27400009986013174,
+      "throughput": {
+        "tokens_per_second": 1868.612457664649,
+        "requests_per_second": 29.19706965101014,
+        "total_tokens": 512,
+        "total_requests": 8
+      },
+      "ttft_first_s": 0.010304100112989545,
+      "ttft_percentiles_s": {
+        "50.0": 0.010328750126063824,
+        "90.0": 0.01034953019116074,
+        "99.0": 0.010354633156675846
+      },
+      "mean_itl_s": 0.004184450791586959,
+      "peak_blocks_used": 96,
+      "max_waste_tokens_per_seq": 15.0
+    },
+    {
+      "total_time_s": 0.2914448999799788,
+      "throughput": {
+        "tokens_per_second": 1756.7643147475646,
+        "requests_per_second": 27.449442417930698,
+        "total_tokens": 512,
+        "total_requests": 8
+      },
+      "ttft_first_s": 0.009089400060474873,
+      "ttft_percentiles_s": {
+        "50.0": 0.009112100000493228,
+        "90.0": 0.009131400031037629,
+        "99.0": 0.009135810064617545
+      },
+      "mean_itl_s": 0.004480650792607949,
+      "peak_blocks_used": 96,
+      "max_waste_tokens_per_seq": 15.0
+    },
+    {
+      "total_time_s": 0.27570550004020333,
+      "throughput": {
+        "tokens_per_second": 1857.053993936792,
+        "requests_per_second": 29.016468655262376,
+        "total_tokens": 512,
+        "total_requests": 8
+      },
+      "ttft_first_s": 0.008962699910625815,
+      "ttft_percentiles_s": {
+        "50.0": 0.008985199965536594,
+        "90.0": 0.009003889956511557,
+        "99.0": 0.00900848891818896
+      },
+      "mean_itl_s": 0.004232884125991,
+      "peak_blocks_used": 96,
+      "max_waste_tokens_per_seq": 15.0
+    },
+    {
+      "total_time_s": 0.27366609987802804,
+      "throughput": {
+        "tokens_per_second": 1870.8930343517027,
+        "requests_per_second": 29.232703661745354,
+        "total_tokens": 512,
+        "total_requests": 8
+      },
+      "ttft_first_s": 0.009556500008329749,
+      "ttft_percentiles_s": {
+        "50.0": 0.00957935000769794,
+        "90.0": 0.009598509944044053,
+        "99.0": 0.009603360907640308
+      },
+      "mean_itl_s": 0.0041910396844503425,
+      "peak_blocks_used": 96,
+      "max_waste_tokens_per_seq": 15.0
+    },
+    {
+      "total_time_s": 0.2729899000842124,
+      "throughput": {
+        "tokens_per_second": 1875.5272625179807,
+        "requests_per_second": 29.30511347684345,
+        "total_tokens": 512,
+        "total_requests": 8
+      },
+      "ttft_first_s": 0.009948400082066655,
+      "ttft_percentiles_s": {
+        "50.0": 0.00997130002360791,
+        "90.0": 0.00999021993484348,
+        "99.0": 0.009994881970342248
+      },
+      "mean_itl_s": 0.004174112697087583,
+      "peak_blocks_used": 96,
+      "max_waste_tokens_per_seq": 15.0
+    }
+  ],
+  "static": [
+    {
+      "total_time_s": 0.26176450005732477,
+      "tokens_per_second": 1955.9565941442604,
+      "total_tokens": 512
+    },
+    {
+      "total_time_s": 0.30260130017995834,
+      "tokens_per_second": 1691.9953737657813,
+      "total_tokens": 512
+    },
+    {
+      "total_time_s": 0.2728346998337656,
+      "tokens_per_second": 1876.5941440438276,
+      "total_tokens": 512
+    },
+    {
+      "total_time_s": 0.26908240001648664,
+      "tokens_per_second": 1902.7628710336678,
+      "total_tokens": 512
+    },
+    {
+      "total_time_s": 0.2696982000488788,
+      "tokens_per_second": 1898.418305747712,
+      "total_tokens": 512
+    }
+  ],
+  "single_sequence": [
+    {
+      "contiguous_mean_ms": 0.4590046919474844,
+      "contiguous_median_ms": 0.4050499992445111,
+      "paged_mean_ms": 0.4717078190878965,
+      "paged_median_ms": 0.41340000461786985
+    },
+    {
+      "contiguous_mean_ms": 0.47818281018408015,
+      "contiguous_median_ms": 0.4243000876158476,
+      "paged_mean_ms": 0.5289468936098274,
+      "paged_median_ms": 0.46300003305077553
+    },
+    {
+      "contiguous_mean_ms": 0.43871405796380714,
+      "contiguous_median_ms": 0.4084501415491104,
+      "paged_mean_ms": 0.4487484438868705,
+      "paged_median_ms": 0.423950026743114
+    },
+    {
+      "contiguous_mean_ms": 0.5095265805721283,
+      "contiguous_median_ms": 0.5006999708712101,
+      "paged_mean_ms": 0.5009796914237086,
+      "paged_median_ms": 0.4677500110119581
+    },
+    {
+      "contiguous_mean_ms": 0.44696249096887186,
+      "contiguous_median_ms": 0.4149500746279955,
+      "paged_mean_ms": 0.5283687423798256,
+      "paged_median_ms": 0.4483999218791723
+    }
+  ],
+  "capacity": {
+    "paged_concurrent_seqs": 21,
+    "contiguous_concurrent_seqs": 8,
+    "ratio": 2.625,
+    "tokens_per_seq": 192,
+    "total_kv_slots": 4096
+  },
+  "summary": {
+    "continuous_tokens_per_sec_median": 1868.612457664649,
+    "continuous_tokens_per_sec_range": [
+      1756.7643147475646,
+      1875.5272625179807
+    ],
+    "static_tokens_per_sec_median": 1898.418305747712,
+    "throughput_ratio_continuous_vs_static": 0.9842996414473976,
+    "ttft_first_ms_median": 9.556500008329749,
+    "ttft_p50_ms_median": 9.57935000769794,
+    "ttft_p90_ms_median": 9.598509944044054,
+    "mean_itl_ms_median": 4.191039684450343,
+    "single_seq_paged_median_ms": 0.4483999218791723,
+    "single_seq_contiguous_median_ms": 0.4149500746279955,
+    "static_total_time_ms_median": 269.6982000488788,
+    "first_output_ratio_static_vs_continuous_p90": 28.09792370077488,
+    "peak_blocks_used": 96,
+    "max_waste_tokens_per_seq": 15.0
+  }
+}

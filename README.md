@@ -11,8 +11,8 @@ is explicit and readable instead of hidden behind a CUDA kernel.
   and values can live in non-adjacent blocks and memory tracks tokens actually generated.
 - **Continuous batching** — new requests join the running batch mid-flight instead of waiting for
   the current batch to drain, with blocks reclaimed the moment a sequence finishes.
-- **Priority scheduler** — capacity-aware admission control, plus lossless preemption that frees a
-  victim's blocks and requeues it at its original priority.
+- **Priority scheduler** — capacity-aware admission control, plus preemption that frees a victim's
+  blocks and requeues it at its original priority rather than failing it back to the client.
 - **Static batching** — a lockstep prefill-then-decode path, kept alongside continuous batching as
   the baseline it improves on.
 - **Full sampling stack** — temperature scaling, top-k, top-p (nucleus), and greedy selection,
@@ -74,8 +74,8 @@ the whole batch to finish.
                                                         (sequence's blocks freed)
 ```
 
-Preemption is lossless: the request returns to the queue rather than the client, so eviction costs
-recomputation but never the request.
+Preemption is non-destructive to the request: an evicted sequence returns to the waiting heap at
+its original priority rather than being failed back to the client.
 
 ## Quickstart
 
